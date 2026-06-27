@@ -1,7 +1,7 @@
 import os
 import logging
 import asyncio
-import re
+import json
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -12,10 +12,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from groq import Groq
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# 📝 የሊኑክስ/Railway ሎግ መቆጣጠሪያ
+# 📝 ሎግ መቆጣጠሪያ
 logging.basicConfig(level=logging.INFO)
 
-# 🔑 የአካባቢ ተለዋዋጮች
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -25,28 +24,44 @@ dp = Dispatcher(storage=MemoryStorage())
 groq_client = Groq(api_key=GROQ_API_KEY)
 scheduler = AsyncIOScheduler()
 
-# 📌 በጊዜያዊ ሚሞሪ የሚቀመጥ የማስታወቂያ ማጠቃለያ ፅሁፍ (Default Footer)
-system_settings = {
-    "ad_footer": "\n\nማስታወቂያ ብቻ ❗️"
-}
+# 📂 የቻናሎች መመዝገቢያ ፋይል ስም
+CHANNELS_FILE = "channels.json"
+SYSTEM_SETTINGS_FILE = "settings.json"
+
+# 🛠 የቻናል ዳታቤዝ አያያዝ ተግባራት (JSON Storage)
+def load_channels():
+    if os.path.exists(CHANNELS_FILE):
+        try:
+            with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_channels(channels_data):
+    with open(CHANNELS_FILE, "w", encoding="utf-8") as f:
+        json.dump(channels_data, f, ensure_ascii=False, indent=4)
+
+def load_settings():
+    if os.path.exists(SYSTEM_SETTINGS_FILE):
+        try:
+            with open(SYSTEM_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"ad_footer": "\n\nማስታወቂያ ብቻ ❗️"}
+    return {"ad_footer": "\n\nማስታወቂያ ብቻ ❗️"}
+
+def save_settings(settings):
+    with open(SYSTEM_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=4)
 
 REFERRAL_PROMPT = """
 You are an expert Amharic digital marketer and copywriter. 
-The user will give you raw data about an online referral job/gig (how much it pays, what tasks to do, how to earn).
+The user will give you raw data about an online referral job/gig.
 Your task is to write a highly compelling, professional, and clear Telegram channel post in natural Amharic.
-Use appropriate emojis, structure it with bullet points, make the earning potential sound exciting but realistic, and ensure it motivates users to click the link and register immediately.
+Use appropriate emojis, structure it with bullet points, and make it look extremely clean.
 Do NOT include any generic tags, just output the ready-to-post Amharic text.
 """
-
-CHANNELS = {
-    "X Forex 🎬": "@your_x_forex_channel",
-    "Squad 4x™ (Main) 🚀": "@your_squad4x_main",
-    "Squad 4xx 📚 (PDF)": "@your_squad4xx_pdf",
-    "ATA BOOTCAMP 🎯": "@your_ata_bootcamp",
-    "HF Trading Hustler 💼": "@your_hf_trading",
-    "7ኛው ቻናል ✨": "@your_seventh_channel",
-    "Hope fx 🌱": "@your_hope_fx"
-}
 
 # 🎭 የቦቱ የሂደት ደረጃዎች (FSM)
 class BotFlow(StatesGroup):
@@ -57,13 +72,15 @@ class BotFlow(StatesGroup):
     waiting_for_manual_post_link = State()
     waiting_for_btn_text = State()
     waiting_for_btn_url = State()
+    # 🆕 አዲስ የቻናል መጨመሪያ ደረጃዎች
+    waiting_for_channel_link = State()
+    waiting_for_channel_name = State()
 
 # --- 🛠 የጀርባ ስራዎች (Scheduler Tasks) ---
 
 async def send_scheduled_post(channel_id, content_type, file_id, text_content, reply_markup, delete_after_mins=None):
     try:
         msg = None
-        # ሚዲያዎችን አይነታቸውን ለይቶ በሊንክ ቁልፍ ማስተላለፍ
         if content_type == "text":
             msg = await bot.send_message(chat_id=channel_id, text=text_content, reply_markup=reply_markup, parse_mode="HTML")
         elif content_type == "photo":
@@ -73,31 +90,29 @@ async def send_scheduled_post(channel_id, content_type, file_id, text_content, r
         elif content_type == "animation":
             msg = await bot.send_animation(chat_id=channel_id, animation=file_id, caption=text_content, reply_markup=reply_markup, parse_mode="HTML")
             
-        if msg:
-            logging.info(f"ፖስት በተሳካ ሁኔታ ተለቋል: {channel_id}")
-            # ⏱ የተጠቃሚው ሰዓት ላይ 6 ደቂቃ ጨምሮ ማጥፋት (Buffer Time)
-            if delete_after_mins and delete_after_mins > 0:
-                actual_delay = delete_after_mins + 6
-                run_time = datetime.now() + timedelta(minutes=actual_delay)
-                scheduler.add_job(delete_expired_post, 'date', run_date=run_time, args=[channel_id, msg.message_id])
+        if msg and delete_after_mins and delete_after_mins > 0:
+            actual_delay = delete_after_mins + 6
+            run_time = datetime.now() + timedelta(minutes=actual_delay)
+            scheduler.add_job(delete_expired_post, 'date', run_date=run_time, args=[channel_id, msg.message_id])
     except Exception as e:
         logging.error(f"መላክ አልተቻለም: {e}")
 
 async def delete_expired_post(channel_id, message_id):
     try:
         await bot.delete_message(chat_id=channel_id, message_id=message_id)
-        logging.info(f"ማስታወቂያው/ፖስቱ በራሱ ጊዜ ጠፍቷል: {message_id}")
+        logging.info(f"ፖስቱ በራሱ ጊዜ ጠፍቷል: {message_id}")
     except Exception as e:
         logging.error(f"ማጥፋት አልተቻለም: {e}")
 
-# --- 🎛 የቁልፍ ሰሌዳዎች (Modular Keyboards) ---
+# --- 🎛 የቁልፍ ሰሌዳዎች ---
 
 def get_main_menu():
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="💸 የሪፈራል ፖስት በ AI ፍጠር", callback_data="main_referral_ai"))
-    builder.add(types.InlineKeyboardButton(text="📝 መደበኛ ፖስት (ፅሁፍ/ፎቶ/ቪዲዮ)", callback_data="main_regular_post"))
-    builder.add(types.InlineKeyboardButton(text="📢 ማስታወቂያ ፖስት (ፅሁፍ/ፎቶ/ቪዲዮ)", callback_data="main_ad_post"))
-    builder.add(types.InlineKeyboardButton(text="🗑 በማንዋል የፖሰቱትን ማጥፊያ (በሊንክ)", callback_data="main_link_delete"))
+    builder.add(types.InlineKeyboardButton(text="📝 መደበኛ ፖስት (ፅሁፍ/ሚዲያ)", callback_data="main_regular_post"))
+    builder.add(types.InlineKeyboardButton(text="📢 ማስታወቂያ ፖስት (ፅሁፍ/ሚዲያ)", callback_data="main_ad_post"))
+    builder.add(types.InlineKeyboardButton(text="📡 ቻናሎችን ማስተዳደር (አዲስ ጨምር/ሰርዝ)", callback_data="main_manage_channels"))
+    builder.add(types.InlineKeyboardButton(text="🗑 በማንዋል የፖሰቱትን ማጥፊያ", callback_data="main_link_delete"))
     builder.add(types.InlineKeyboardButton(text="⚙️ የማስታወቂያ ፅሁፍ (Footer) ቀይር", callback_data="main_change_footer"))
     builder.adjust(1)
     return builder.as_markup()
@@ -126,14 +141,124 @@ async def handle_go_to_main(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🎛 **ዋናው ማውጫ**\nየሚፈልጉትን ተግባር ከታች ይምረጡ፦", reply_markup=get_main_menu(), parse_mode="Markdown")
     await callback.answer()
 
-# --- ⚙️ የማስታወቂያ ፅሁፍ (Footer) ማስተካከያ ክፍል ---
+# --- 🆕 📡 ክፍል 0፦ የቻናሎች ማስተዳደሪያ ክፍል (Dynamic Channel Management) ---
+
+@dp.callback_query(F.data == "main_manage_channels")
+async def manage_channels_menu(callback: types.CallbackQuery):
+    channels = load_channels()
+    text = "📡 **የቻናሎች ማስተዳደሪያ ማዕከል**\n\n"
+    if channels:
+        text += "📋 **የተመዘገቡ ቻናሎች ዝርዝር፦**\n"
+        for name, cid in channels.items():
+            text += f"• {name} (`{cid}`)\n"
+    else:
+        text += "⚠️ እስካሁን ምንም የተመዘገበ ቻናል የለም።"
+        
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(text="➕ አዲስ ቻናል ጨምር", callback_data="chan_add_start"))
+    if channels:
+        builder.add(types.InlineKeyboardButton(text="❌ ቻናል ከዝርዝር ሰርዝ", callback_data="chan_delete_start"))
+    builder.add(types.InlineKeyboardButton(text="↩️ ወደ ዋናው ማውጫ", callback_data="go_to_main"))
+    builder.adjust(1)
+    
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "chan_add_start")
+async def channel_add_step1(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(BotFlow.waiting_for_channel_link)
+    await callback.message.edit_text(
+        "🔗 **አዲስ ቻናል መጨመሪያ**\n\n"
+        "1. መጀመሪያ ቦቱን በቻናልዎ ላይ **Admin (አስተዳዳሪ)** አድርገው ይጨምሩት።\n"
+        "2. በመቀጠል የቻናሉን **@username** (ምሳሌ፦ `@mysquad4x`) ይላኩሉኝ።\n\n"
+        "*(ቻናሉ Private ከሆነ የቻናሉን ID መላክ ይችላሉ ምሳሌ፦ `-100123456789`)*",
+        reply_markup=InlineKeyboardBuilder().add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="main_manage_channels")).as_markup(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.message(BotFlow.waiting_for_channel_link)
+async def channel_add_step2_check_admin(message: types.Message, state: FSMContext):
+    input_data = message.text.strip()
+    chat_id = input_data
+    
+    # ሊንክ ከሆነ ዩዘርኔሙን ወይም IDውን ነጥሎ ማውጣት
+    if "t.me/" in input_data:
+        parts = input_data.split('/')
+        if 'c' in parts:
+            idx = parts.index('c')
+            chat_id = f"-100{parts[idx+1]}"
+        else:
+            chat_id = f"@{parts[-1]}"
+    elif not input_data.startswith("@") and not input_data.startswith("-"):
+        chat_id = f"@{input_data}"
+
+    checking_msg = await message.reply("⏳ ቦቱ በቻናሉ ላይ Admin መሆኑን እያረጋገጥኩ ነው...")
+    
+    try:
+        # 🔍 ቦቱ አድሚን መሆኑን ቼክ ማድረጊያ ዘዴ
+        chat = await bot.get_chat(chat_id)
+        bot_member = await bot.get_chat_member(chat_id=chat.id, user_id=bot.id)
+        
+        if bot_member.status in ["administrator", "creator"]:
+            # አድሚን ከሆነ ወደ ቀጣዩ ደረጃ (ስም መቀበል) ማለፍ
+            await state.update_data(verified_chat_id=str(chat.id))
+            await bot.delete_message(chat_id=message.chat.id, message_id=checking_msg.message_id)
+            await state.set_state(BotFlow.waiting_for_channel_name)
+            await message.reply(
+                f"✅ **አድሚንነቱ ተረጋግጧል!**\n\n"
+                f"ቦቱ በቻናሉ (`{chat.title}`) ላይ በተሳካ ሁኔታ አድሚን ሆኗል።\n\n"
+                f"✍️ አሁን ደግሞ ፖስት በሚያደርጉበት ጊዜ በመምረጫ ማውጫ ላይ እንዲመጣልዎ የሚፈልጉትን **የቻናሉን መለያ ስም** ይጻፉልኝ (ምሳሌ፦ `Squad 4x™ (Main) 🚀`):",
+                parse_mode="Markdown"
+            )
+        else:
+            await message.reply("❌ ቦቱ በቻናሉ ውስጥ አለ ነገር ግን **Admin (አስተዳዳሪ)** አልተደረገም። እባክዎ መጀመሪያ በቻናሉ ሴቲንግ ውስጥ ገብተው ቦቱን አድሚን ያድርጉትና ድጋሚ ይሞክሩ።")
+    except Exception as e:
+        await message.reply("❌ ቻናሉ አልተገኘም ወይም ቦቱ በቻናሉ ላይ አልተጨመረም!\n\nእባክዎ መጀመሪያ ቦቱን በቻናሉ ላይ Admin አድርገው መመዝገብዎን ያረጋግጡ።")
+
+@dp.message(BotFlow.waiting_for_channel_name)
+async def channel_add_step3_save(message: types.Message, state: FSMContext):
+    display_name = message.text.strip()
+    data = await state.get_data()
+    chat_id = data.get("verified_chat_id")
+    
+    channels = load_channels()
+    channels[display_name] = chat_id
+    save_channels(channels)
+    
+    await message.reply(f"✅ **ስኬት!**\n'{display_name}' የተባለው ቻናል በተሳካ ሁኔታ ተመዝግቧል። አሁን ፖስት ለመልቀቅ ዝግጁ ነው!", reply_markup=get_main_menu())
+    await state.clear()
+
+@dp.callback_query(F.data == "chan_delete_start")
+async def channel_delete_menu(callback: types.CallbackQuery):
+    channels = load_channels()
+    builder = InlineKeyboardBuilder()
+    for name in channels.keys():
+        builder.add(types.InlineKeyboardButton(text=f"🗑 {name}", callback_data=f"delc_{name}"))
+    builder.add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="main_manage_channels"))
+    builder.adjust(1)
+    await callback.message.edit_text("❌ **ለመሰረዝ የፈለጉትን ቻናል ይምረጡ፦**", reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("delc_"))
+async def channel_delete_execute(callback: types.CallbackQuery):
+    chan_name = callback.data.split("delc_")[1]
+    channels = load_channels()
+    if chan_name in channels:
+        del channels[chan_name]
+        save_channels(channels)
+        await callback.answer(f"✅ {chan_name} ተሰርዟል!", show_alert=True)
+    await manage_channels_menu(callback)
+
+# --- ⚙️ የማስታወቂያ ፅሁፍ (Footer) ማስተካከያ ---
 
 @dp.callback_query(F.data == "main_change_footer")
 async def change_footer_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(BotFlow.waiting_for_ad_footer_input)
-    current = system_settings['ad_footer'].replace('\n', '')
+    settings = load_settings()
+    current = settings['ad_footer'].replace('\n', '')
     await callback.message.edit_text(
-        f"⚙️ **የማስታወቂያ ማሳሰቢያ ፅሁፍ መቀየሪያ**\n\nአሁን ያለው ፅሁፍ: `{current}`\n\nእባክዎን አዲስ እንዲሆን የሚፈልጉትን ማሳሰቢያ ይጻፉልኝ (ምሳሌ: `\n\nማስታወቂያ ብቻ ❗️`):",
+        f"⚙️ **የማስታወቂያ ማሳሰቢያ ፅሁፍ መቀየሪያ**\n\nአሁን ያለው ፅሁፍ: `{current}`\n\nእባክዎን አዲስ እንዲሆን የሚፈልጉትን ማሳሰቢያ ይጻፉልኝ (ምሳሌ: `ማስታወቂያ ብቻ ❗️`):",
         reply_markup=InlineKeyboardBuilder().add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="go_to_main")).as_markup(),
         parse_mode="Markdown"
     )
@@ -141,8 +266,10 @@ async def change_footer_start(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(BotFlow.waiting_for_ad_footer_input)
 async def change_footer_save(message: types.Message, state: FSMContext):
-    system_settings["ad_footer"] = "\n\n" + message.text.strip()
-    await message.reply(f"✅ የማስታወቂያ ማሳሰቢያው በተሳካ ሁኔታ ተቀይሯል! ወደፊት ለሚለቀቁ ማስታወቂያዎች ጥቅም ላይ ይውላል።", reply_markup=get_main_menu())
+    settings = load_settings()
+    settings["ad_footer"] = "\n\n" + message.text.strip()
+    save_settings(settings)
+    await message.reply(f"✅ የማስታወቂያ ማሳሰቢያው በተሳካ ሁኔታ ተቀይሯል!", reply_markup=get_main_menu())
     await state.clear()
 
 # --- 💸 ክፍል 1፦ የሪፈራል ፖስት ፈጣሪ (Groq AI) ---
@@ -151,7 +278,7 @@ async def change_footer_save(message: types.Message, state: FSMContext):
 async def handle_referral_ai(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(BotFlow.waiting_for_referral_info)
     await callback.message.edit_text(
-        "💰 **የሪፈራል ፖስት ማዘጋጃ ክፍል (Groq AI)**\n\nስለ ኦንላይን ስራው መረጃዎችን (የሚከፈለውን ብር፣ የሳይቱን ስም) ይንገሩኝ፤ እሱ ማራኪ አድርጎ ይጽፍልዎታል፦",
+        "💰 **የሪፈራል ፖስት ማዘጋጃ ክፍል (Groq AI)**\n\nስለ ኦንላይን ስራው መረጃዎችን ይንገሩኝ፤ ማራኪ አድርጎ ይጽፍልዎታል፦",
         reply_markup=InlineKeyboardBuilder().add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="go_to_main")).as_markup()
     )
     await callback.answer()
@@ -171,7 +298,7 @@ async def process_referral_ai(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.reply(f"❌ ስህተት: {e}", reply_markup=get_main_menu())
 
-# --- 📝 ክፍል 2 እና 3፦ መደበኛ እና ማስታወቂያ ፖስት መቀበያ (ሁሉንም ሚዲያ እና ፎርዋርድ የሚደግፍ) ---
+# --- 📝 ክፍል 2 እና 3፦ መደበኛ እና ማስታወቂያ ፖስት መቀበያ ---
 
 @dp.callback_query(F.data.in_({"main_regular_post", "main_ad_post"}))
 async def handle_post_input_start(callback: types.CallbackQuery, state: FSMContext):
@@ -193,7 +320,6 @@ async def process_incoming_post(message: types.Message, state: FSMContext):
     data = await state.get_data()
     post_type = data.get("post_type", "regular")
     
-    # የይዘት አይነት እና ሚዲያ መለየት
     content_type = "text"
     file_id = None
     if message.photo:
@@ -206,22 +332,16 @@ async def process_incoming_post(message: types.Message, state: FSMContext):
         content_type = "animation"
         file_id = message.animation.file_id
 
-    # የኦሪጂናል ፅሁፍ ወይም የካፕሽን ይዘትን ከነፎርማቱ በ HTML መውሰድ
     raw_text = message.html_text if message.html_text else ""
     
-    # ማስታወቂያ ከሆነ እርስዎ ያስቀመጡትን ፅሁፍ ብቻ ከስር መቀጠል
     if post_type == "ad":
-        raw_text += system_settings["ad_footer"]
+        settings = load_settings()
+        raw_text += settings["ad_footer"]
 
     await state.update_data(final_text=raw_text, content_type=content_type, file_id=file_id, btn_text=None, btn_url=None)
-    
-    await message.reply(
-        "✅ **ይዘቱ በተሳካ ሁኔታ ተዘጋጅቷል!**\nከታች ካሉት አማራጮች ቀጣዩን ይምረጡ፦",
-        reply_markup=get_post_options_menu(),
-        parse_mode="HTML"
-    )
+    await message.reply("✅ **ይዘቱ በተሳካ ሁኔታ ተዘጋጅቷል!**", reply_markup=get_post_options_menu(), parse_mode="HTML")
 
-# --- 🔗 Inline ሊንክ ቁልፍ ማያያዣ መስመር ---
+# --- 🔗 Inline ሊንክ ቁልፍ ማያያዣ ---
 
 @dp.callback_query(F.data == "flow_add_button")
 async def handle_flow_add_button(callback: types.CallbackQuery, state: FSMContext):
@@ -240,14 +360,19 @@ async def get_flow_btn_url(message: types.Message, state: FSMContext):
     if not message.text.startswith(("http://", "https://", "t.me/")):
         return await message.reply("❌ እባክህ ትክክለኛ ሊንክ ያስገቡ!")
     await state.update_data(btn_url=message.text)
-    await message.reply("✅ የሊንክ ቁልፉ ተይዟል። መድረሻ ቻናል ለመምረጥ ቀጣይ የሚለውን ይጫኑ፦", reply_markup=get_post_options_menu(has_button=True))
+    await message.reply("✅ የሊንክ ቁልፉ ተይዟል።", reply_markup=get_post_options_menu(has_button=True))
 
-# --- 📊 የቻናሎች መምረጫ እና የጊዜ ማስተካከያ ማውጫዎች ---
+# --- 📊 የቻናሎች መምረጫ (Dynamic Load) ---
 
 @dp.callback_query(F.data == "flow_choose_channel")
 async def handle_flow_choose_channel(callback: types.CallbackQuery):
+    channels = load_channels()
+    if not channels:
+        await callback.message.edit_text("⚠️ ምንም የተመዘገበ ቻናል የለም! እባክዎ መጀመሪያ ከዋናው ማውጫ ላይ '📡 ቻናሎችን ማስተዳደር' የሚለውን በመጠቀም ቻናል ያስገቡ።", reply_markup=get_main_menu())
+        return
+        
     builder = InlineKeyboardBuilder()
-    for name, cid in CHANNELS.items():
+    for name, cid in channels.items():
         builder.add(types.InlineKeyboardButton(text=name, callback_data=f"selchan_{cid}"))
     builder.add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="go_to_main"))
     builder.adjust(2)
@@ -274,14 +399,12 @@ async def process_schedule_selection(callback: types.CallbackQuery, state: FSMCo
     
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="♾ ለዘላለም ይኑር (አይጥፋ)", callback_data="deltime_never"))
-    builder.add(types.InlineKeyboardButton(text="🗑 ከ 1 ሰዓት በኋላ (+6 ደቂቃ ትርፍ)", callback_data="deltime_60"))
-    builder.add(types.InlineKeyboardButton(text="🗑 ከ 6 ሰዓት በኋላ (+6 ደቂቃ ትርፍ)", callback_data="deltime_360"))
-    builder.add(types.InlineKeyboardButton(text="🗑 ከ 24 ሰዓት በኋላ (+6 ደቂቃ ትርፍ)", callback_data="deltime_1440"))
+    builder.add(types.InlineKeyboardButton(text="🗑 ከ 1 ሰዓት በኋላ (+6 ደቂቃ)", callback_data="deltime_60"))
+    builder.add(types.InlineKeyboardButton(text="🗑 ከ 6 ሰዓት በኋላ (+6 ደቂቃ)", callback_data="deltime_360"))
+    builder.add(types.InlineKeyboardButton(text="🗑 ከ 24 ሰዓት በኋላ (+6 ደቂቃ)", callback_data="deltime_1440"))
     builder.adjust(1)
     await callback.message.edit_text("🗑 **ፖስቱ ከቻናሉ ላይ የሚጠፋበት ሰዓት (Auto-Delete)፦**", reply_markup=builder.as_markup())
     await callback.answer()
-
-# --- ⚠️ የመጨረሻ ማረጋገጫ ማውጫ (Double-Check Screen) ---
 
 @dp.callback_query(F.data.startswith("deltime_"))
 async def handle_confirmation_screen(callback: types.CallbackQuery, state: FSMContext):
@@ -290,27 +413,25 @@ async def handle_confirmation_screen(callback: types.CallbackQuery, state: FSMCo
     await state.update_data(delete_after_mins=delete_mins)
     
     data = await state.get_data()
-    post_type_label = "📢 ማስታወቂያ" if data.get("post_type") == "ad" else "📝 መደበኛ/የሪፈራል ፖስት"
+    post_type_label = "📢 ማስታወቂያ" if data.get("post_type") == "ad" else "📝 መደበኛ ፖስት"
     sched_label = "⚡️ አሁኑኑ" if data.get("schedule_after_mins") == 0 else f"⏱ ከ {data.get('schedule_after_mins')} ደቂቃ በኋላ"
-    del_label = f"🗑 ከ {delete_mins + 6} ደቂቃ በኋላ (6 ደቂቃ ትርፍ ተጨምሯል)" if delete_mins > 0 else "♾ ለዘላለም ይኖራል"
+    del_label = f"🗑 ከ {delete_mins + 6} ደቂቃ በኋላ" if delete_mins > 0 else "♾ ለዘላለም ይኖራል"
         
     confirm_text = (
         "⚠️ **የመጨረሻ ማረጋገጫ (Double-Check)**\n\n"
         f"🔹 **የፖስት አይነት፦** {post_type_label}\n"
-        f"📢 **መድረሻ ቻናል፦** {data.get('target_channel')}\n"
+        f"📢 **መድረሻ ቻናል (ID)፦** `{data.get('target_channel')}`\n"
         f"⏰ **የመልቀቂያ ሰዓት፦** {sched_label}\n"
         f"🗑 **የማጥፊያ ሰዓት፦** {del_label}\n\n"
         f"📄 **የፅሁፉ ቅድመ-ዕይታ፦**\n"
         f"---------------------------\n"
-        f"{data.get('final_text')[:400]}...\n"
+        f"{data.get('final_text')[:300]}...\n"
         f"---------------------------"
     )
-    
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="✅ ሁሉንም አረጋግጣለሁ - ፈጽም! 🚀", callback_data="execute_final_post"))
-    builder.add(types.InlineKeyboardButton(text="❌ ስህተት አለ - ሰርዝና ተመለስ", callback_data="go_to_main"))
+    builder.add(types.InlineKeyboardButton(text="❌ ሰርዝና ተመለስ", callback_data="go_to_main"))
     builder.adjust(1)
-    
     await callback.message.edit_text(confirm_text, reply_markup=builder.as_markup(), parse_mode="HTML")
     await callback.answer()
 
@@ -348,7 +469,7 @@ async def execute_final_post(callback: types.CallbackQuery, state: FSMContext):
 async def manual_link_delete_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(BotFlow.waiting_for_manual_post_link)
     await callback.message.edit_text(
-        "🗑 **የማንዋል ፖስት በሊንክ ማጥፊያ ማዘዣ**\n\nእባክዎን በቻናሉ ላይ በግል የፖሰቱትን የትኛውንም መልዕክት ሊንክ (Post Link) ኮፒ አድርገው እዚህ ይላኩሉኝ፦",
+        "🗑 **የማንዋል ፖስት በሊንክ ማጥፊያ**\n\nእባክዎን በቻናሉ ላይ እራስዎ የፖሰቱትን ማንኛውንም መልዕክት ሊንክ (Post Link) እዚህ ይላኩሉኝ፦",
         reply_markup=InlineKeyboardBuilder().add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="go_to_main")).as_markup()
     )
     await callback.answer()
@@ -357,7 +478,6 @@ async def manual_link_delete_start(callback: types.CallbackQuery, state: FSMCont
 async def process_manual_link(message: types.Message, state: FSMContext):
     link = message.text.strip()
     try:
-        # የቴሌግራም ሊንክን ቻናል ID እና የሜሴጅ ID ለመለየት የሚደረግ አሰሳ
         parts = link.split('/')
         msg_id = int(parts[-1])
         channel_identifier = parts[-2]
@@ -370,10 +490,9 @@ async def process_manual_link(message: types.Message, state: FSMContext):
             
         await state.update_data(target_channel=channel_id, manual_msg_id=msg_id)
         
-        # የሰዓት ምርጫ
         builder = InlineKeyboardBuilder()
-        builder.add(types.InlineKeyboardButton(text="🗑 ከ 1 ሰዓት በኋላ (+6 ደቂቃ ትርፍ)", callback_data="man_del_60"))
-        builder.add(types.InlineKeyboardButton(text="🗑 ከ 24 ሰዓት በኋላ (+6 ደቂቃ ትርፍ)", callback_data="man_del_1440"))
+        builder.add(types.InlineKeyboardButton(text="🗑 ከ 1 ሰዓት በኋላ (+6 ደቂቃ)", callback_data="man_del_60"))
+        builder.add(types.InlineKeyboardButton(text="🗑 ከ 24 ሰዓት በኋላ (+6 ደቂቃ)", callback_data="man_del_1440"))
         builder.add(types.InlineKeyboardButton(text="❌ ሰርዝ", callback_data="go_to_main"))
         builder.adjust(1)
         
@@ -393,15 +512,10 @@ async def execute_manual_link_delete(callback: types.CallbackQuery, state: FSMCo
     run_time = datetime.now() + timedelta(minutes=actual_delay)
     scheduler.add_job(delete_expired_post, 'date', run_date=run_time, args=[channel_id, msg_id])
     
-    await callback.message.edit_text(
-        f"✅ **የማንዋል ማጥፊያ ማዘዣ ተመዝግቧል!**\n\nፖስቱ ከ {actual_delay} ደቂቃ በኋላ ከቻናሉ ላይ በራሱ ይጠፋል።",
-        reply_markup=get_main_menu(),
-        parse_mode="Markdown"
-    )
+    await callback.message.edit_text(f"✅ **የማንዋል ማጥፊያ ማዘዣ ተመዝግቧል!**\n\nፖስቱ ከ {actual_delay} ደቂቃ በኋላ ከቻናሉ ላይ በራሱ ይጠፋል።", reply_markup=get_main_menu(), parse_mode="Markdown")
     await state.clear()
     await callback.answer()
 
-# --- 🚀 ማስነሻ ---
 async def main():
     scheduler.start()
     await dp.start_polling(bot)
