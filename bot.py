@@ -27,11 +27,14 @@ scheduler = AsyncIOScheduler()
 CHANNELS_FILE = "channels.json"
 SYSTEM_SETTINGS_FILE = "settings.json"
 
-# 📂 የፋይል አያያዝ ተግባራት
+# 📂 የፋይል አያያዝ ተግባራት (የተስተካከለ የመስመር አወቃቀር)
 def load_channels():
     if os.path.exists(CHANNELS_FILE):
-        try: with open(CHANNELS_FILE, "r", encoding="utf-8") as f: return json.load(f)
-        except Exception: return {}
+        try:
+            with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
 def save_channels(channels_data):
@@ -48,8 +51,10 @@ def load_settings():
     }
     if os.path.exists(SYSTEM_SETTINGS_FILE):
         try:
-            with open(SYSTEM_SETTINGS_FILE, "r", encoding="utf-8") as f: return json.load(f)
-        except Exception: return default_settings
+            with open(SYSTEM_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default_settings
     return default_settings
 
 def save_settings(settings):
@@ -62,7 +67,7 @@ class BotFlow(StatesGroup):
     waiting_for_referral_info = State()
     waiting_for_regular_post = State()
     waiting_for_ad_post = State()
-    waiting_for_ad_sign_input = State() # 🆕 ምልክት መቀበያ
+    waiting_for_ad_sign_input = State()
     waiting_for_manual_post_link = State()
     waiting_for_btn_text = State()
     waiting_for_btn_url = State()
@@ -75,7 +80,6 @@ async def send_scheduled_post(channel_id, content_type, file_id, text_content, r
     msg_ids = []
     try:
         main_msg = None
-        # 1. ኦሪጂናል ማስታወቂያውን ወይም መደበኛ ፖስቱን መለጠፍ (ያለ ምንም ጭማሪ ፅሁፍ)
         if content_type == "text":
             main_msg = await bot.send_message(chat_id=channel_id, text=text_content, reply_markup=reply_markup, parse_mode="HTML")
         elif content_type == "photo":
@@ -88,7 +92,6 @@ async def send_scheduled_post(channel_id, content_type, file_id, text_content, r
         if main_msg:
             msg_ids.append(main_msg.message_id)
             
-        # 2. ፖስቱ "ማስታወቂያ" ከሆነ ብቻ ሴቭ የተደረገውን ምልክት (Sign) ቀጥሎ መለጠፍ
         if post_type == "ad":
             settings = load_settings()
             sign = settings.get("ad_sign", {"content_type": "text", "text": "ማስታወቂያ ብቻ ❗️", "file_id": None})
@@ -104,7 +107,6 @@ async def send_scheduled_post(channel_id, content_type, file_id, text_content, r
             if sign_msg:
                 msg_ids.append(sign_msg.message_id)
                 
-        # ⏱ የማጥፊያ ሰዓት ከታዘዘ ሁለቱንም መልዕክቶች በአንድ ላይ እንዲጠፉ መቅጠር
         if msg_ids and delete_after_mins and delete_after_mins > 0:
             actual_delay = delete_after_mins + 6
             run_time = datetime.now() + timedelta(minutes=actual_delay)
@@ -157,14 +159,14 @@ async def handle_go_to_main(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🎛 **ዋናው ማውጫ**", reply_markup=get_main_menu(), parse_mode="Markdown")
     await callback.answer()
 
-# --- ⚙️ 🆕 የማስታወቂያ ምልክት በፎርዋርድ መቀበያ እና ሴቭ ማድረጊያ ክፍል ---
+# --- ⚙️ የማስታወቂያ ምልክት በፎርዋርድ መቀበያ ክፍል ---
 
 @dp.callback_query(F.data == "main_change_sign")
 async def change_sign_start(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(BotFlow.waiting_for_ad_sign_input)
     await callback.message.edit_text(
         "⚙️ **የማስታወቂያ ምልክት (Ad Sign) መቀየሪያ**\n\n"
-        "እባክዎን ማስታወቂያው እንደተለጠፈ ወዲያውኑ ከስር በሁለተኛ መልዕክትነት እንዲከተል የሚፈልጉትን ፅሁፍ (Custom Emoji ያለበትን) "
+        "እባክዎን ማስታወቂያው እንደተለጠፈ ወዲያውኑ ከስር በሁለተኛ መልዕክትነት እንዲከተል የሚፈልጉትን ፅሁፍ "
         "ወይም ስቲከር/ፎቶ ከሌላ ቦታ **Forward** አድርገው ይላኩሉኝ ወይም እዚህ ይጻፉት፦",
         reply_markup=InlineKeyboardBuilder().add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="go_to_main")).as_markup()
     )
@@ -179,11 +181,10 @@ async def change_sign_save(message: types.Message, state: FSMContext):
     elif message.photo:
         settings["ad_sign"] = {"content_type": "photo", "text": message.html_text, "file_id": message.photo[-1].file_id}
     else:
-        # የ Custom Emoji ቅርፅ እንዳይበላሽ በ HTML ፎርማት ሴቭ ይደረጋል
         settings["ad_sign"] = {"content_type": "text", "text": message.html_text, "file_id": None}
         
     save_settings(settings)
-    await message.reply("✅ የማስታወቂያ ምልክቱ በተሳካ ሁኔታ ሴቭ ተደርጓል! ለወደፊት ማስታወቂያዎች በሙሉ ጥቅም ላይ ይውላል።", reply_markup=get_main_menu())
+    await message.reply("✅ የማስታወቂያ ምልክቱ በተሳካ ሁኔታ ሴቭ ተደርጓል!", reply_markup=get_main_menu())
     await state.clear()
 
 # --- 📡 ቻናሎችን ማስተዳደር ---
@@ -192,12 +193,15 @@ async def change_sign_save(message: types.Message, state: FSMContext):
 async def manage_channels_menu(callback: types.CallbackQuery):
     channels = load_channels()
     text = "📡 **የቻናሎች ማስተዳደሪያ**\n\n📋 **የተመዘገቡ ቻናሎች፦**\n"
-    for name, cid in channels.items(): text += f"• {name} (`{cid}`)\n"
-    if not channels: text += "⚠️ ምንም የተመዘገበ ቻናል የለም።"
+    for name, cid in channels.items(): 
+        text += f"• {name} (`{cid}`)\n"
+    if not channels: 
+        text += "⚠️ ምንም የተመዘገበ ቻናል የለም።"
     
     builder = InlineKeyboardBuilder()
     builder.add(types.InlineKeyboardButton(text="➕ አዲስ ቻናል ጨምር", callback_data="chan_add_start"))
-    if channels: builder.add(types.InlineKeyboardButton(text="❌ ቻናል ሰርዝ", callback_data="chan_delete_start"))
+    if channels: 
+        builder.add(types.InlineKeyboardButton(text="❌ ቻናል ሰርዝ", callback_data="chan_delete_start"))
     builder.add(types.InlineKeyboardButton(text="↩️ ወደ ዋናው ማውጫ", callback_data="go_to_main"))
     builder.adjust(1)
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
@@ -206,7 +210,7 @@ async def manage_channels_menu(callback: types.CallbackQuery):
 async def channel_add_step1(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(BotFlow.waiting_for_channel_link)
     await callback.message.edit_text(
-        "🔗 **አዲስ ቻናል መጨመሪያ**\n\n1. ቦቱን በቻናልዎ ላይ **Admin** ያድርጉት።\n2. የቻናሉን **@username** ወይም ID ይላኩሉኝ፦",
+        "🔗 **አዲስ ቻናል መጨመሪያ**\n\n1. ቦቱን በቻናልዎ ላይ **Admin** ያድርጉት。\n2. የቻናሉን **@username** ወይም ID ይላኩሉኝ፦",
         reply_markup=InlineKeyboardBuilder().add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="main_manage_channels")).as_markup()
     )
 
@@ -245,7 +249,8 @@ async def channel_add_step3_save(message: types.Message, state: FSMContext):
 async def channel_delete_menu(callback: types.CallbackQuery):
     channels = load_channels()
     builder = InlineKeyboardBuilder()
-    for name in channels.keys(): builder.add(types.InlineKeyboardButton(text=f"🗑 {name}", callback_data=f"delc_{name}"))
+    for name in channels.keys(): 
+        builder.add(types.InlineKeyboardButton(text=f"🗑 {name}", callback_data=f"delc_{name}"))
     builder.add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="main_manage_channels"))
     builder.adjust(1)
     await callback.message.edit_text("❌ መሰረዝ የሚፈልጉትን ቻናል ይምረጡ፦", reply_markup=builder.as_markup())
@@ -281,12 +286,15 @@ async def process_referral_ai(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.reply(f"❌ ስህተት: {e}", reply_markup=get_main_menu())
 
-# --- 📝 መደበኛ እና ማስታወቂያ ፖስት መቀበያ (ንፁህ ይዘት) ---
+# --- 📝 መደበኛ እና ማስታወቂያ ፖስት መቀበያ ---
 
 @dp.callback_query(F.data.in_({"main_regular_post", "main_ad_post"}))
 async def handle_post_input_start(callback: types.CallbackQuery, state: FSMContext):
     ptype = "regular" if callback.data == "main_regular_post" else "ad"
-    await state.set_state(BotFlow.waiting_for_regular_post if ptype == "regular" else BotFlow.waiting_for_ad_post)
+    if ptype == "regular":
+        await state.set_state(BotFlow.waiting_for_regular_post)
+    else:
+        await state.set_state(BotFlow.waiting_for_ad_post)
     await state.update_data(post_type=ptype)
     
     label = "📝 መደበኛ ፖስት" if ptype == "regular" else "📢 የማስታወቂያ ፖስት"
@@ -298,13 +306,15 @@ async def process_incoming_post(message: types.Message, state: FSMContext):
     content_type = "text"
     file_id = None
     if message.photo:
-        content_type = "photo"; file_id = message.photo[-1].file_id
+        content_type = "photo"
+        file_id = message.photo[-1].file_id
     elif message.video:
-        content_type = "video"; file_id = message.video.file_id
+        content_type = "video"
+        file_id = message.video.file_id
     elif message.animation:
-        content_type = "animation"; file_id = message.animation.file_id
+        content_type = "animation"
+        file_id = message.animation.file_id
 
-    # ⚠️ እርስዎ የላኩት የማስታወቂያ ፅሁፍ ላይ ምንም አይነት ተጨማሪ ነገር ሳይጨመር እንዳለ ንፁህ ይዘቱ ይወሰዳል
     raw_text = message.html_text if message.html_text else ""
     await state.update_data(final_text=raw_text, content_type=content_type, file_id=file_id, btn_text=None, btn_url=None)
     await message.reply("✅ **ይዘቱ በተሳካ ሁኔታ ተይዟል!**", reply_markup=get_post_options_menu(), parse_mode="HTML")
@@ -324,7 +334,8 @@ async def get_flow_btn_text(message: types.Message, state: FSMContext):
 
 @dp.message(BotFlow.waiting_for_btn_url)
 async def get_flow_btn_url(message: types.Message, state: FSMContext):
-    if not message.text.startswith(("http://", "https://", "t.me/")): return await message.reply("❌ ስህተት ሊንክ!")
+    if not message.text.startswith(("http://", "https://", "t.me/")): 
+        return await message.reply("❌ ስህተት ሊንክ!")
     await state.update_data(btn_url=message.text)
     await message.reply("✅ ሊንኩ ተይዟል።", reply_markup=get_post_options_menu(has_button=True))
 
@@ -336,7 +347,8 @@ async def handle_flow_choose_channel(callback: types.CallbackQuery):
     if not channels:
         return await callback.message.edit_text("⚠️ መጀመሪያ ቻናል ይመዝግቡ!", reply_markup=get_main_menu())
     builder = InlineKeyboardBuilder()
-    for name, cid in channels.items(): builder.add(types.InlineKeyboardButton(text=name, callback_data=f"selchan_{cid}"))
+    for name, cid in channels.items(): 
+        builder.add(types.InlineKeyboardButton(text=name, callback_data=f"selchan_{cid}"))
     builder.add(types.InlineKeyboardButton(text="↩️ ተመለስ", callback_data="go_to_main"))
     builder.adjust(2)
     await callback.message.edit_text("🚀 **ቻናል ይምረጡ፦**", reply_markup=builder.as_markup())
