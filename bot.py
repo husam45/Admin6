@@ -76,7 +76,7 @@ def save_settings(settings):
 # ──────────────────────────────────────────
 
 REFERRAL_PROMPT = (
-    "You are an expert Amharic digital marketer. "
+    "You are an expert English digital marketer. "
     "Write a highly compelling, professional, and clear "
     "Telegram channel post based on the raw text provided. "
     "Use emojis naturally. Keep it concise and persuasive."
